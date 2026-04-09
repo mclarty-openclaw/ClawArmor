@@ -1,0 +1,97 @@
+{
+  "$schema": "./claw-armor.config.schema.json",
+  "version": "1",
+
+  "allDefensesEnabled": true,
+  "defaultBlockingMode": "enforce",
+
+  "fastPath": {
+    "selfProtection": {
+      "enabled": true,
+      "mode": "enforce",
+      "protectedPaths": [],
+      "protectedSkillIds": [],
+      "protectedPluginIds": []
+    },
+    "commandBlock": {
+      "enabled": true,
+      "mode": "enforce"
+    },
+    "encodingGuard": {
+      "enabled": true,
+      "mode": "enforce"
+    },
+    "scriptProvenanceGuard": {
+      "enabled": true,
+      "mode": "enforce"
+    },
+    "memoryGuard": {
+      "enabled": true,
+      "mode": "enforce"
+    },
+    "loopGuard": {
+      "enabled": true,
+      "mode": "observe",
+      "maxCallsPerRun": 3
+    },
+    "exfiltrationGuard": {
+      "enabled": true,
+      "mode": "observe"
+    },
+    "userRiskScan": {
+      "enabled": true
+    },
+    "skillScan": {
+      "enabled": true,
+      "startupScan": false,
+      "roots": []
+    },
+    "toolResultScan": {
+      "enabled": true
+    },
+    "outputRedaction": {
+      "enabled": true
+    },
+    "promptGuard": {
+      "enabled": true
+    },
+    "taintTracking": {
+      "enabled": true
+    }
+  },
+
+  "slowEngine": {
+    "enabled": false,
+    "intentAlignment": {
+      "enabled": true
+    },
+    "controlFlowCheck": {
+      "enabled": true
+    },
+    "dataFlowCheck": {
+      "enabled": true
+    },
+    "model": {
+      "provider": "disabled",
+      "ollama": {
+        "baseUrl": "http://localhost:11434",
+        "model": "llama3",
+        "timeoutMs": 10000
+      },
+      "openaiCompat": {
+        "baseUrl": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "apiKey": "",
+        "apiKeyEnvVar": "DEEPSEEK_API_KEY",
+        "timeoutMs": 10000
+      }
+    }
+  },
+
+  "customThreatPatterns": {
+    "protectedPaths": [],
+    "dangerousCommands": [],
+    "sensitiveDataRedaction": [],
+    "injectionDetection": []
+  }
+}

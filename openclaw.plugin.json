@@ -1,0 +1,33 @@
+{
+  "id": "claw-armor",
+  "name": "ClawArmor",
+  "description": "混合驱动的新一代 Agent 安全插件 - 五层纵深防御 + 语义意图对齐",
+  "version": "1.1.0",
+  "configFile": "claw-armor.config.json",
+  "configSchema": {
+    "type": "object",
+    "description": "插件配置存放于独立文件 claw-armor.config.json，此处仅支持紧急覆盖（emergency overrides）",
+    "additionalProperties": true,
+    "properties": {
+      "allDefensesEnabled": {
+        "type": "boolean",
+        "description": "主开关：false 时完全禁用插件（默认 true）"
+      },
+      "defaultBlockingMode": {
+        "type": "string",
+        "enum": ["enforce", "observe", "off"],
+        "description": "全局阻断模式紧急覆盖（优先级高于 claw-armor.config.json）"
+      }
+    }
+  },
+  "uiHints": {
+    "allDefensesEnabled": {
+      "label": "启用所有防御",
+      "description": "设为 false 可完全禁用 ClawArmor（紧急停用开关）"
+    },
+    "defaultBlockingMode": {
+      "label": "阻断模式覆盖",
+      "description": "enforce=强制阻断; observe=仅记录; off=关闭（覆盖配置文件设置）"
+    }
+  }
+}
