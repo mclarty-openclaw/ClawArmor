@@ -31,6 +31,7 @@ import {
   redactOutput,
   detectPiiTypes,
 } from "../engine-fast/rule-engine.js";
+import { EMBEDDED_EXEC_PATTERNS } from "../engine-fast/threat-patterns.js";
 import { redactSecretVariants } from "../engine-fast/payload-scanner.js";
 import {
   runDefenseChain,
@@ -76,6 +77,11 @@ export type ClawArmorHooks = {
   onPlanGenerated(e: { sessionKey: string; runId: string; plan: string }): Promise<HookVerdict>;
   onMemoryWrite(e: { sessionKey: string; key: string; content: string }): Promise<HookVerdict>;
   beforeAgentReply(e: { sessionKey: string; content: string }): { content: string; redactedCount: number };
+  /**
+   * 工具结果注入检测 + 逐行净化（同步，用于 tool_result_persist hook）
+   * 扫描嵌入式执行指令，替换危险行，使 LLM 下一轮看到的是已净化内容
+   */
+  checkAndNeutralizeInjection(toolName: string, content: string): { content: string; isSuspicious: boolean; flags: string[] };
   buildPromptContext(sessionKey: string): string;
   onSessionEnd(sessionKey: string): Promise<void>;
   onRunEnd(runId: string): Promise<void>;
@@ -119,7 +125,7 @@ export function createClawArmorRuntime(
   const log = logger.child({ module: "hooks" });
   const state = new SessionStateManager(stateDir, logger);
   const taintTracker = new TaintTracker();
-  const gateway = new ModelGateway(config.slowEngine);
+  const gateway = new ModelGateway(config.slowEngine, log);
   const skillWatcher = new SkillWatcher(logger);
   const baselineIntents = new Map<string, BaselineIntent>();
   const exfilStates = new Map<string, ExfilChainState>();
@@ -193,6 +199,8 @@ export function createClawArmorRuntime(
     // Hook 2: 工具调用前（最核心的防御节点）
     // ----------------------------------------------------------
     async beforeToolCall({ sessionKey, runId, toolName, params }) {
+      // INFO 级别日志：确认 before_tool_call 钩子被 OpenClaw 框架正确触发
+      log.info("[ClawArmor] 工具调用前检查", { toolName, paramKeys: Object.keys(params) });
       log.debug("[ClawArmor] 拦截工具调用", { toolName, paramKeys: Object.keys(params) });
       const loopCounts = getOrCreateLoopCounts(runId);
       const riskyPaths = getOrCreateRiskyPaths(runId);
@@ -266,6 +274,8 @@ export function createClawArmorRuntime(
     // Hook 3: 工具调用后
     // ----------------------------------------------------------
     async afterToolCall({ sessionKey, runId, toolName, result, isExternal }) {
+      // INFO 级别日志：确认 after_tool_call 钩子被 OpenClaw 框架正确触发
+      log.info("[ClawArmor] 工具返回扫描", { toolName, resultLength: result.length });
       // 工具结果扫描（Fast Path）
       if (config.toolResultScanEnabled) {
         const report = scanToolResult(toolName, result, isExternal);
@@ -292,6 +302,16 @@ export function createClawArmorRuntime(
         if (piiTypes.length > 0) {
           state.appendTurnFlags(sessionKey, { runtimeFlags: [`pii-in-tool:${piiTypes.join(",")}`] });
           log.warn("[ClawArmor] 工具返回含个人敏感数据，将注入脱敏指令", { toolName, types: piiTypes });
+
+          // 关键：将 PII 阳性的工具结果同步写入外泄链 source 信号
+          // 这样后续若 Agent 用 exec/curl/web_fetch 向外发送数据，exfiltrationGuard 能检测到完整 source→sink 链
+          const exfilState = getOrCreateExfilState(runId);
+          if (!exfilState.sourceSignals.includes(`pii-source:${toolName}`)) {
+            exfilStates.set(runId, {
+              ...exfilState,
+              sourceSignals: [...exfilState.sourceSignals, `pii-source:${toolName}`],
+            });
+          }
         }
 
         // 尝试通过返回值修改工具结果（若当前 OpenClaw 版本支持则生效，否则由 prompt 指令兜底）
@@ -372,6 +392,34 @@ export function createClawArmorRuntime(
       }
 
       return { content: result, redactedCount: redactedCount + variantRedactedCount };
+    },
+
+    // ----------------------------------------------------------
+    // 工具结果注入检测 + 净化（同步，用于 tool_result_persist hook）
+    // ----------------------------------------------------------
+    checkAndNeutralizeInjection(toolName: string, content: string): { content: string; isSuspicious: boolean; flags: string[] } {
+      if (!config.toolResultScanEnabled) return { content, isSuspicious: false, flags: [] };
+
+      const report = scanToolResult(toolName, content, false);
+      if (!report.isSuspicious) return { content, isSuspicious: false, flags: [] };
+
+      log.warn("[ClawArmor] 工具返回含嵌入式注入指令，持久化前已净化", {
+        toolName,
+        flags: report.flags,
+      });
+
+      // 逐行净化：将匹配嵌入式执行模式的行替换为警示文本
+      const neutralized = content
+        .split("\n")
+        .map((line) => {
+          if (EMBEDDED_EXEC_PATTERNS.some((p) => p.regex.test(line))) {
+            return `[ClawArmor 已屏蔽可疑指令 (${report.flags.slice(0, 3).join(",")})]`;
+          }
+          return line;
+        })
+        .join("\n");
+
+      return { content: neutralized, isSuspicious: true, flags: report.flags };
     },
 
     // ----------------------------------------------------------

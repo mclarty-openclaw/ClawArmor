@@ -325,6 +325,37 @@ export function createFileLogger(options: {
 }
 
 /**
+ * 将 meta 对象中的关键字段序列化追加到 message 字符串
+ * 用于绕过 OpenClaw api.logger 静默丢弃 meta 的问题
+ * 超长字符串字段（如 systemPrompt / userContent / response）截断至 200 字符
+ */
+function buildMessageWithMeta(message: string, meta: Record<string, unknown>): string {
+  if (Object.keys(meta).length === 0) return message;
+
+  // 长文本字段截断，避免单行日志过长
+  const LONG_FIELDS = new Set(["systemPrompt", "userContent", "response", "stack"]);
+  const MAX_FIELD_LEN = 200;
+
+  const compacted: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (v === undefined || v === null || v === "") continue;
+    if (LONG_FIELDS.has(k) && typeof v === "string" && v.length > MAX_FIELD_LEN) {
+      compacted[k] = v.slice(0, MAX_FIELD_LEN) + "…";
+    } else {
+      compacted[k] = v;
+    }
+  }
+
+  if (Object.keys(compacted).length === 0) return message;
+
+  try {
+    return `${message} | ${JSON.stringify(compacted)}`;
+  } catch {
+    return message;
+  }
+}
+
+/**
  * 从现有 AegisLogger（如 OpenClaw 注入的 logger）创建 ArmorLogger
  * 将第三方 logger 包装成 ArmorLogger，保留结构化能力
  */
@@ -338,6 +369,8 @@ export function fromAegisLogger(
   context: LoggerContext = {},
 ): ArmorLogger {
   // 桥接传输器：将结构化日志转发给 AegisLogger
+  // 注意：OpenClaw 的 api.logger 只写 message 字符串，meta 参数被静默丢弃
+  // 因此将关键 meta 字段直接序列化追加到 message 中，确保在 gateway.log 可见
   const bridgeTransport: LogTransport = {
     name: "aegis-bridge",
     write(entry: LogEntry): void {
@@ -347,12 +380,15 @@ export function fromAegisLogger(
       if (entry.securityEvent) meta.securityEvent = entry.securityEvent;
       if (entry.durationMs !== undefined) meta.durationMs = entry.durationMs;
 
+      // 将 meta 序列化追加到 message，绕过 OpenClaw logger 丢弃 meta 的问题
+      const message = buildMessageWithMeta(entry.message, meta);
+
       switch (entry.level) {
         case "trace":
-        case "debug": aegisLogger.debug?.(entry.message, meta); break;
-        case "info":  aegisLogger.info(entry.message, meta); break;
-        case "warn":  aegisLogger.warn(entry.message, meta); break;
-        case "error": aegisLogger.error(entry.message, meta); break;
+        case "debug": aegisLogger.debug?.(message, meta); break;
+        case "info":  aegisLogger.info(message, meta); break;
+        case "warn":  aegisLogger.warn(message, meta); break;
+        case "error": aegisLogger.error(message, meta); break;
       }
     },
   };

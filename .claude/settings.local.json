@@ -58,7 +58,15 @@
       "Bash(grep ClawArmor.*插件已启动 /Users/georgehu/.openclaw/logs/gateway.log)",
       "Bash(ls:*)",
       "Bash(find /Users/georgehu/Mycode/ClawArmor -name PRD* -o -name prd*)",
-      "Bash(find /Users/georgehu/.openclaw/skills/clawra-selfie -name *.md -o -name *.json)"
+      "Bash(find /Users/georgehu/.openclaw/skills/clawra-selfie -name *.md -o -name *.json)",
+      "Bash(find /Users/georgehu/.openclaw/skills -type f -name *.sh -o -name *.ts -o -name *.js)",
+      "Bash(grep -r target /Users/georgehu/.openclaw/agents/main/sessions --include=*.json*)",
+      "Bash(openclaw message:*)",
+      "Bash(curl:*)",
+      "Bash(npx vitest:*)",
+      "Bash(find ~/.openclaw -name *.log)",
+      "Bash(grep -E 2026-04-09.*before_tool /Users/georgehu/.openclaw/logs/gateway.log)",
+      "Bash(grep ClawArmor.*插件已启动 ~/.openclaw/logs/gateway.log)"
     ]
   }
 }

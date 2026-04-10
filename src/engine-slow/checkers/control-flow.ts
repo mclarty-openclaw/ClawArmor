@@ -41,7 +41,7 @@ export async function checkControlFlowIntegrity(
   const systemPrompt = loadSystemPrompt();
   const userContent = buildControlFlowPayload(callChain, currentTool, currentParams);
 
-  const result = await gateway.safeVerify(systemPrompt, userContent, 256);
+  const result = await gateway.safeVerify(systemPrompt, userContent, 256, "control-flow");
 
   if (!result) {
     return { safe: true, taintedArgs: [] };

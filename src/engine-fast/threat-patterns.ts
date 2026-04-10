@@ -84,6 +84,11 @@ export const DANGEROUS_COMMAND_PATTERNS: readonly ThreatPattern[] = [
   { id: "poweroff",            regex: /\b(?:poweroff|shutdown\s+-[hH]|halt\s+-f|reboot\s+-f)\b/ },
   // curl/wget 管道执行（Fast Path 侧，Slow Path 做语义深度分析）
   { id: "remote-pipe-exec",    regex: /(?:curl|wget)\s+[^\|]+\|\s*(?:su?do\s+)?(?:sh|bash|zsh|ash|dash)\b/ },
+  // exec 调用 curl 向外部地址 POST 数据（通过 exec/bash 绕过 web_fetch 工具的数据外发行为）
+  // 要求同时包含：curl 命令 + -d/-D 数据标志 + 非本地 HTTP(S) URL
+  { id: "exec-curl-data-exfil", regex: /\bcurl\b(?=.{0,500}-[dD]\b)(?=.{0,500}https?:\/\/(?!(?:localhost|127\.0\.0\.1|0\.0\.0\.0)))/s },
+  // exec 调用 wget --post 向外部发送文件数据
+  { id: "exec-wget-post-exfil", regex: /\bwget\b(?=.{0,300}--post-(?:data|file))(?=.{0,300}https?:\/\/(?!(?:localhost|127\.0\.0\.1|0\.0\.0\.0)))/s },
   // OpenClaw 自身控制命令（防止插件被卸载）
   { id: "openclaw-ctrl",       regex: /\bopenclaw\s+plugins?\s+(?:uninstall|remove|disable)\b/i },
   { id: "openclaw-ctrl-cn",    regex: /openclaw.*(?:卸载|删除|禁用).*插件/ },
@@ -99,8 +104,9 @@ export const PROTECTED_PATH_PATTERNS: readonly ThreatPattern[] = [
   { id: "ssh-dir",         regex: /(?:^|\/)\.ssh(?:\/|$)/ },
   // Shell 初始化文件
   { id: "shell-rc",        regex: /(?:^|\/)\.(?:bash(?:rc|_profile|_history)|zshrc|zprofile|profile|zsh_history)(?:$|\/)/ },
-  // OpenClaw 自身目录（精确保护敏感子目录，排除 media/ workspace/ canvas/ 等正常运行目录）
-  { id: "openclaw-dir",    regex: /(?:^|\/)\.openclaw\/(?:plugins|extensions|agents|skills|tasks)(?:\/|$)/ },
+  // OpenClaw 自身目录（仅保护安全敏感子目录：plugins/extensions 含安全插件代码，agents 含会话/人格数据）
+  // 排除 skills/（agent 能力库，需要可读可执行）、tasks/（任务定义）、media/ workspace/ canvas/ 等运行目录
+  { id: "openclaw-dir",    regex: /(?:^|\/)\.openclaw\/(?:plugins|extensions|agents)(?:\/|$)/ },
   // 系统敏感文件
   { id: "etc-sensitive",   regex: /(?:^|\/)etc\/(?:passwd|shadow|sudoers|hosts|crontab)(?:$|\/)/ },
   // AWS/云凭证
@@ -134,6 +140,10 @@ export const MEMORY_WRITE_RISK_PATTERNS: readonly ThreatPattern[] = [
 export const EXFIL_SOURCE_SIGNALS: readonly ThreatPattern[] = [
   { id: "read-sensitive",  regex: /(?:read|cat|get|fetch)\s+(?:.*\/)?(?:\.env|secrets?|credentials?|\.ssh\/|config\.ya?ml)/i },
   { id: "env-access",      regex: /process\.env\b|os\.environ\b|\$\{?[A-Z_]{5,}\}?/ },
+  // 通用文件读取（任何本地路径读取均作为潜在 source，配合 sink 信号判断是否构成外泄链）
+  { id: "read-local-file", regex: /(?:read|cat|open|load)\s+(?:file\s+)?["']?(?:\/|~\/|\.\/|\.\.\/)\S+/i },
+  // 参数中含本地文件路径引用（如 curl -d @/tmp/file）
+  { id: "file-ref-param",  regex: /@(?:\/|~\/|\.\/)\S+/ },
 ];
 
 export const EXFIL_TRANSFORM_SIGNALS: readonly ThreatPattern[] = [
@@ -143,10 +153,13 @@ export const EXFIL_TRANSFORM_SIGNALS: readonly ThreatPattern[] = [
 ];
 
 export const EXFIL_SINK_SIGNALS: readonly ThreatPattern[] = [
-  { id: "curl-post",       regex: /curl\s+(?:-[A-Z]\s+)*-[dD]\s+['"]?@?/ },
+  // curl POST 外发：匹配 URL-first（curl URL -d data）和 flags-first（curl -d data URL）两种写法
+  { id: "curl-post",       regex: /\bcurl\b[^|;&]{0,400}-[dD]\b/s },
   { id: "wget-post",       regex: /wget\s+--post-(?:data|file)\s+/ },
   { id: "nc-send",         regex: /\bnc\s+(?:-[a-z]+\s+)*[0-9]{1,3}\.[0-9]{1,3}/ },
   { id: "dns-exfil",       regex: /\bnslookup\s+\$|dig\s+\$\{/ },
+  // curl/wget 向非本地 HTTP 地址发送数据（无论是否有 -d，-X POST 也算 sink）
+  { id: "curl-external",   regex: /\bcurl\b[^|;&]{0,200}https?:\/\/(?!(?:localhost|127\.0\.0\.1|0\.0\.0\.0))/s },
 ];
 
 // ============================================================
@@ -212,10 +225,12 @@ export const EMBEDDED_EXEC_PATTERNS: readonly ThreatPattern[] = [
   // 文档中隐藏的 bash -c 执行块
   { id: "inline-bash-c",        regex: /^\s*(?:sh|bash|zsh|ash)\s+-c\s+/mi },
   // "请执行以下命令" / "please execute" 类社会工程学诱导
-  { id: "social-exec-cn",       regex: /请(?:立即|马上|)?(?:执行|运行|输入|操作)(?:以下|如下|下列)?(?:命令|指令|步骤|操作)/u },
+  // 允许"以下"与目标词之间存在最多 5 个字符（如"维护指令"中的"维护"）
+  { id: "social-exec-cn",       regex: /请(?:立即|马上|)?(?:执行|运行|输入|操作)(?:以下|如下|下列)?.{0,5}(?:命令|指令|步骤|操作)/u },
   { id: "social-exec-en",       regex: /please\s+(?:execute|run|perform)\s+(?:the\s+)?(?:following|below)\s+(?:command|instruction)/i },
   // 维护模块/自动模块标记（伪装成系统内容的注入框）
-  { id: "fake-maintenance-cn",  regex: /[-—]{2,}\s*(?:系统|自动|维护|巡检|诊断)\s*(?:模块|步骤|操作|维护)\s*[-—]{2,}/ },
+  // 允许关键词之间存在最多 10 个字符（如"系统自动维护模块"中"自动维护"夹在两个关键词之间）
+  { id: "fake-maintenance-cn",  regex: /[-—]{2,}\s*(?:系统|自动|维护|巡检|诊断).{0,10}(?:模块|步骤|操作|维护)\s*[-—]{2,}/ },
 ];
 
 // ============================================================

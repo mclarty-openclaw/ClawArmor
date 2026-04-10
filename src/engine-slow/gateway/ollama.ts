@@ -19,17 +19,25 @@ type OllamaChatResponse = {
 };
 
 export class OllamaAdapter implements IVerifierModel {
+  private readonly apiBase: string;
+  private readonly modelName: string;
+
   constructor(
-    private readonly baseUrl: string,
-    private readonly model: string,
+    baseUrl: string,
+    model: string,
     private readonly timeoutMs: number = 10_000,
-  ) {}
+  ) {
+    // 规范化 baseUrl：移除 /v1 后缀，确保指向 Ollama 原生 API 根路径
+    this.apiBase = baseUrl.replace(/\/v1\/?$/, "").replace(/\/$/, "");
+    // 规范化 model name：移除 ollama/ 前缀（Ollama 原生 API 只需 model 短名）
+    this.modelName = model.replace(/^ollama\//, "");
+  }
 
   async isAvailable(): Promise<boolean> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 3_000);
-      const response = await fetch(`${this.baseUrl}/api/tags`, {
+      const response = await fetch(`${this.apiBase}/api/tags`, {
         signal: controller.signal,
       });
       clearTimeout(timer);
@@ -51,11 +59,11 @@ export class OllamaAdapter implements IVerifierModel {
     const startedAt = Date.now();
 
     try {
-      const response = await fetch(`${this.baseUrl}/api/chat`, {
+      const response = await fetch(`${this.apiBase}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: this.model,
+          model: this.modelName,
           messages,
           stream: false,
           options: {
