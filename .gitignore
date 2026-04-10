@@ -6,3 +6,5 @@ publish/
 coverage/
 .env
 *.local
+CLAUDE.MD
+PRD.MD
