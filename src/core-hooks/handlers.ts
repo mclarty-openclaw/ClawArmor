@@ -83,6 +83,12 @@ export type ClawArmorHooks = {
    */
   checkAndNeutralizeInjection(toolName: string, content: string): { content: string; isSuspicious: boolean; flags: string[] };
   buildPromptContext(sessionKey: string): string;
+  /**
+   * 补充捕获基准意图：before_agent_start 时 messages 为空，before_prompt_build 时有 messages，
+   * 在此处补充更新，使意图对齐 LLM 能获得真实的用户原始输入。
+   * 若该 session 已有非空基准则不覆盖。
+   */
+  updateBaselineIntent(sessionKey: string, input: string): void;
   onSessionEnd(sessionKey: string): Promise<void>;
   onRunEnd(runId: string): Promise<void>;
 };
@@ -165,7 +171,8 @@ export function createClawArmorRuntime(
         const report = scanUserInput(userInput);
         if (report.isSuspicious) {
           state.appendTurnFlags(sessionKey, { injectionFlags: report.flags });
-          log.warn("[ClawArmor] 用户输入检测到风险模式", { flags: report.flags });
+          // 使用 info 级别确保 gateway 日志可见（warn 有时被 OpenClaw 日志级别过滤）
+          log.info("[ClawArmor] 用户输入检测到风险模式", { flags: report.flags, sessionKey });
         }
       }
 
@@ -229,6 +236,12 @@ export function createClawArmorRuntime(
       });
 
       if (verdict.action === "block") {
+        log.warn("[ClawArmor] 工具调用已拦截", {
+          toolName,
+          layer: verdict.layer ?? "unknown",
+          reason: verdict.reason ?? BLOCK_REASON_HIGH_RISK_OPERATION,
+          flags: verdict.matchedFlags ?? [],
+        });
         return { action: "block", reason: verdict.reason ?? BLOCK_REASON_HIGH_RISK_OPERATION };
       }
       if (verdict.action === "observe") {
@@ -460,6 +473,17 @@ export function createClawArmorRuntime(
       }
 
       return parts.join("\n");
+    },
+
+    // ----------------------------------------------------------
+    // 基准意图补充捕获（before_agent_start 无 messages 时的兜底）
+    // ----------------------------------------------------------
+    updateBaselineIntent(sessionKey: string, input: string) {
+      const existing = baselineIntents.get(sessionKey);
+      if (!existing || !existing.originalInput) {
+        baselineIntents.set(sessionKey, captureBaselineIntent(sessionKey, input));
+        log.info("[ClawArmor] 基准意图补充捕获（来自 before_prompt_build messages）", { sessionKey });
+      }
     },
 
     // ----------------------------------------------------------

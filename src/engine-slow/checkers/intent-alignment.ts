@@ -72,13 +72,19 @@ export async function checkIntentAlignment(
 }
 
 function buildVerificationPayload(originalIntent: string, currentPlan: string): string {
+  // 若基准意图为空（before_agent_start 时消息结构未能解析），明确注明，
+  // 避免 LLM 看到空节而无法参考，改为仅凭 Agent 行为信号做判断
+  const intentSection = originalIntent.trim()
+    ? originalIntent
+    : "（未捕获 — 会话开始时消息内容为空或格式不兼容，请仅凭 Agent 行为信号判断风险）";
+
   return `## 用户原始意图
-${originalIntent}
+${intentSection}
 
 ## Agent 当前计划
 ${currentPlan}
 
-请判断两者的语义一致性，并输出 JSON 格式的判断结果。`;
+请判断两者的语义一致性，输出 JSON 格式的判断结果。`;
 }
 
 function parseAlignmentResult(content: string): IntentAlignmentResult {

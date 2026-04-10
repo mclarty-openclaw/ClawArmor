@@ -75,6 +75,26 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
   api.on("before_agent_start", (raw: unknown) => {
     const event = raw as PluginHookAgentStartEvent;
     return wrapHook("agent_start", async () => {
+      const rawObj = raw as Record<string, unknown>;
+      // 诊断日志（debug 级别，OpenClaw api.logger 不透传，生产环境静默）
+      logger.debug("[ClawArmor][diag] before_agent_start 事件字段", {
+        keys: Object.keys(rawObj),
+        messagesCount: Array.isArray(rawObj.messages) ? (rawObj.messages as unknown[]).length : "none",
+        lastMsgRole: Array.isArray(rawObj.messages) && (rawObj.messages as unknown[]).length > 0
+          ? ((rawObj.messages as Array<{role?:string}>).at(-1)?.role ?? "?")
+          : "none",
+        lastUserContent: (() => {
+          const msgs = rawObj.messages as Array<{role:string;content:unknown}>|undefined;
+          if (!Array.isArray(msgs)) return "none";
+          const u = [...msgs].reverse().find(m => m.role === "user");
+          if (!u) return "none";
+          const c = u.content;
+          const text = typeof c === "string" ? c : Array.isArray(c)
+            ? (c as Array<{type?:string;text?:string}>).filter(x=>!x.type||x.type==="text").map(x=>x.text??"").join("").trim()
+            : "";
+          return text.slice(0, 100);
+        })(),
+      });
       const userInput = extractUserInput(event);
       await runtime.hooks.onAgentStart({
         sessionKey: event.sessionKey,
@@ -195,6 +215,26 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
     return wrapHook("before_prompt_build", async () => {
       // Step 1: 读取 Fast Path 累计的本轮风险信号
       const turn = runtime.state.peekTurnSignals(event.sessionKey);
+      // 诊断：打印 before_prompt_build 事件字段及 messages 末尾用户消息
+      {
+        const eObj = event as Record<string, unknown>;
+        const msgs = eObj.messages as Array<{role:string;content:unknown}>|undefined;
+        const lastUser = Array.isArray(msgs) ? [...msgs].reverse().find(m=>m.role==="user") : undefined;
+        const lastUserText = (() => {
+          if (!lastUser) return "none";
+          const c = lastUser.content;
+          const text = typeof c === "string" ? c : Array.isArray(c)
+            ? (c as Array<{type?:string;text?:string}>).filter(x=>!x.type||x.type==="text").map(x=>x.text??"").join("").trim()
+            : "";
+          return text.slice(0, 100);
+        })();
+        logger.debug("[ClawArmor][diag] before_prompt_build messages 诊断", {
+          keys: Object.keys(eObj).filter(k=>k!=="messages"),
+          messagesCount: Array.isArray(msgs) ? msgs.length : "none",
+          lastMsgRole: Array.isArray(msgs) && msgs.length > 0 ? msgs[msgs.length-1]?.role : "none",
+          lastUserContent: lastUserText,
+        });
+      }
       logger.info("[ClawArmor] before_prompt_build 触发", {
         sessionKey: event.sessionKey,
         hasTurnSignals: !!turn,
@@ -203,13 +243,38 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
         runtimeFlags: turn?.runtimeFlags ?? [],
       });
 
+      // Step 1.5: before_agent_start 事件通常不含 messages，导致基准意图为空。
+      // 在 before_prompt_build 时 messages 已存在，在此补充捕获用户原始意图（只捕获一次，不覆盖已有值）
+      const eventObj = event as Record<string, unknown>;
+      {
+        const msgs = eventObj.messages as Array<{ role: string; content: unknown }> | undefined;
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          const lateInput = extractUserInput({ messages: msgs } as PluginHookAgentStartEvent);
+          if (lateInput) runtime.hooks.updateBaselineIntent(event.sessionKey, lateInput);
+        }
+      }
+
       // Step 2: 确定 LLM 检查输入
-      //   优先使用 OpenClaw 传入的显式 plan/planText 字段
-      //   无显式 plan 时从风险信号合成（只有规则命中才会有信号）
-      //   两者均无 → clean turn，跳过 LLM
-      const explicitPlan = (event as Record<string, unknown>).planText as string | undefined
-        ?? (event as Record<string, unknown>).plan as string | undefined;
-      const planForLLM = explicitPlan ?? buildSyntheticPlanContext(turn);
+      //   优先级：显式 plan/planText > 本轮对话上下文 + Fast Path 信号 > Fast Path 信号 > null（跳过）
+      const explicitPlan = eventObj.planText as string | undefined
+        ?? eventObj.plan as string | undefined;
+
+      let planForLLM: string | null;
+      if (explicitPlan) {
+        planForLLM = explicitPlan;
+      } else {
+        // 从事件的 messages 数组提取本轮最新对话内容（Agent 当前正在做什么）
+        const turnContext = extractCurrentTurnContext(eventObj);
+        const fastPathSignals = buildSyntheticPlanContext(turn);
+        if (turnContext || fastPathSignals) {
+          const parts: string[] = [];
+          if (turnContext) parts.push(`【本轮对话上下文（最近消息）】\n${turnContext}`);
+          if (fastPathSignals) parts.push(fastPathSignals);
+          planForLLM = parts.join("\n\n");
+        } else {
+          planForLLM = null; // 零风险信号且无消息上下文，跳过 LLM
+        }
+      }
 
       // Step 3: Slow Path 意图对齐（规则通过后的语义二次验证）
       if (planForLLM) {
@@ -323,15 +388,87 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
 
 function extractUserInput(event: PluginHookAgentStartEvent): string {
   try {
+    const rawObj = event as unknown as Record<string, unknown>;
+
+    // OpenClaw 实际在 before_agent_start 中通过 prompt 字段传递当前用户消息，
+    // messages 数组在首次调用时不存在，后续调用中有但末尾是上一轮消息（落后一轮）
+    // 因此优先读取 prompt 字段作为本轮用户意图
+    const prompt = rawObj.prompt;
+    if (typeof prompt === "string" && prompt.trim()) return prompt.trim();
+    if (Array.isArray(prompt)) {
+      const text = (prompt as Array<{ type?: string; text?: string }>)
+        .filter((c) => !c.type || c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("")
+        .trim();
+      if (text) return text;
+    }
+
+    // 兜底：从 messages 中找最后一条 user 消息（兼容字符串和数组两种 content 格式）
     const messages = (event.messages ?? []) as Array<{ role: string; content: unknown }>;
     const last = [...messages].reverse().find((m) => m.role === "user");
-    return typeof last?.content === "string" ? last.content : "";
+    if (!last) return "";
+    const content = last.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return (content as Array<{ type?: string; text?: string }>)
+        .filter((c) => !c.type || c.type === "text")
+        .map((c) => c.text ?? "")
+        .join("")
+        .trim();
+    }
+    return "";
   } catch { return ""; }
 }
 
 function extractResultText(result: unknown): string {
   if (typeof result === "string") return result;
   try { return JSON.stringify(result) ?? ""; } catch { return ""; }
+}
+
+/**
+ * 从消息 content 字段提取纯文本（兼容字符串和 [{type,text}] 数组两种格式）
+ */
+function extractMessageContent(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    return (content as Array<{ type?: string; text?: string }>)
+      .filter((c) => !c.type || c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("")
+      .trim();
+  }
+  return "";
+}
+
+/**
+ * 从 before_prompt_build 事件的 messages 数组中提取本轮最新对话上下文
+ * 取最近 3 条消息（user / assistant / tool），每条截断至 200 字符
+ * 用于填充 LLM prompt 中的 "## Agent 当前计划" 节，让意图对齐模型看到真实上下文
+ * 若事件不含 messages 字段则返回 null
+ */
+function extractCurrentTurnContext(event: Record<string, unknown>): string | null {
+  try {
+    const messages = event.messages as Array<{ role: string; content: unknown }> | undefined;
+    if (!Array.isArray(messages) || messages.length === 0) return null;
+
+    // 取最近 3 条，避免 prompt 过长撑爆小模型上下文
+    const recent = messages.slice(-3);
+    const MAX_CONTENT_LEN = 200;
+    const lines: string[] = [];
+
+    for (const msg of recent) {
+      const role = (msg.role ?? "").toLowerCase();
+      const text = extractMessageContent(msg.content);
+      if (!text) continue;
+      const label = role === "user" ? "用户" : role === "assistant" ? "助手" : "工具返回";
+      const truncated = text.length > MAX_CONTENT_LEN
+        ? text.slice(0, MAX_CONTENT_LEN) + "…"
+        : text;
+      lines.push(`[${label}] ${truncated}`);
+    }
+    return lines.length > 0 ? lines.join("\n") : null;
+  } catch { return null; }
 }
 
 const EXTERNAL_TOOL_RE = /^(?:web_fetch|web_search|browser|firecrawl_\w+|tavily_\w+|http_request|api)$/i;
@@ -341,6 +478,9 @@ function isExternalTool(name: string): boolean { return EXTERNAL_TOOL_RE.test(na
  * 当 before_prompt_build 无显式 plan 时，从本轮 Fast Path 累计的风险信号合成
  * 供意图对齐 LLM 使用的上下文摘要。
  * 若本轮无任何风险信号（规则引擎零命中）则返回 null，跳过 LLM 调用，节省开销。
+ *
+ * 注意：返回值直接作为 currentPlan 放入 buildVerificationPayload 的 "## Agent 当前计划" 节，
+ * 因此不应包含自己的 ## 标题（避免标题嵌套），也不应包含结尾指令（由 buildVerificationPayload 统一添加）。
  */
 function buildSyntheticPlanContext(turn: TurnSignals | undefined): string | null {
   if (!turn) return null;
@@ -356,11 +496,6 @@ function buildSyntheticPlanContext(turn: TurnSignals | undefined): string | null
   if (turn.skillRiskFlags.length > 0) {
     parts.push(`Skill 扫描发现风险：${turn.skillRiskFlags.join(", ")}`);
   }
-  // runtimeFlags 中 pii-in-* 是 PII 脱敏标记，不属于意图劫持信号，过滤掉
-  const intentFlags = turn.runtimeFlags.filter((f) => !f.startsWith("pii-in-"));
-  if (intentFlags.length > 0) {
-    parts.push(`其他运行时风险标记：${intentFlags.join(", ")}`);
-  }
   if (turn.hasExternalToolResult) {
     parts.push(`本轮使用了外部数据源（外部工具返回内容已进入上下文）`);
   }
@@ -370,20 +505,22 @@ function buildSyntheticPlanContext(turn: TurnSignals | undefined): string | null
   if (piiToolFlags.length > 0) {
     parts.push(`工具返回含个人敏感数据（${piiToolFlags.join(", ")}），需警惕后续外发操作是否构成数据泄露`);
   }
-  // 其余非 PII 运行时标记
-  const otherFlags = turn.runtimeFlags.filter((f) => !f.startsWith("pii-in-"));
+  // 其余非 PII、非自身生成的运行时标记
+  // 过滤 intent-suspect：该标记由 ClawArmor 自身写入 runtimeFlags，
+  // 若再回传给 LLM，会形成自引用反馈循环（LLM 每次都返回 suspect）
+  const SELF_GENERATED_FLAGS = new Set(["intent-suspect"]);
+  const otherFlags = turn.runtimeFlags.filter(
+    (f) => !f.startsWith("pii-in-") && !SELF_GENERATED_FLAGS.has(f),
+  );
   if (otherFlags.length > 0) {
     parts.push(`其他运行时风险标记：${otherFlags.join(", ")}`);
   }
 
   if (parts.length === 0) return null; // 零风险信号，跳过 LLM
 
-  return [
-    "## 本轮 Agent 行为摘要（Fast Path 规则引擎检测结果）",
-    ...parts,
-    "",
-    "请判断以上异常信号是否与用户原始意图一致，是否存在意图劫持或数据外泄风险。",
-  ].join("\n");
+  // 只返回信号列表，不添加 ## 标题（避免嵌入 buildVerificationPayload 后出现标题嵌套）
+  // 也不添加结尾指令（由 buildVerificationPayload 统一添加）
+  return ["【Fast Path 规则引擎检测结果】", ...parts].join("\n");
 }
 
 // ---- 插件默认导出（OpenClaw 标准格式）----

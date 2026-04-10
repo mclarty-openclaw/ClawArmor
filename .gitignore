@@ -8,3 +8,4 @@ coverage/
 *.local
 CLAUDE.MD
 PRD.MD
+docs/prd.md
