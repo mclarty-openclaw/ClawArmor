@@ -1,5 +1,25 @@
 # ClawArmor 变更日志
 
+## [1.3.6] - 2026-04-10 ✅ 单元测试 176/176，银行卡号脱敏规则全量通过
+
+### 新增（银行卡号识别与脱敏）
+
+- `OUTPUT_REDACTION_RULES` 新增 `cn-bank-card` 规则（位于 `cn-id` 之后）：覆盖银联（`62xxxx`，16-19 位）、Visa（`4xxxx`，16 位）、MasterCard（`5[1-5]xxxx`，16 位）、AmEx（`3[47]xxxx`，15 位）四大卡组织，脱敏为 `[银行卡已脱敏]`
+- `PII_DETECTORS` 新增 `银行卡号` 检测器，与 `OUTPUT_REDACTION_RULES` 使用相同正则，命中后触发动态脱敏指令注入
+- `PROMPT_GUARD_STATIC.outputRedaction` 静态规则追加银行卡号提示，防止 LLM 在生成阶段输出原始卡号
+- `PROMPT_GUARD_DYNAMIC.piiDetected` 动态规则追加 `银行卡号→[银行卡已脱敏]` 映射
+
+### 测试
+
+- `tests/engine-fast/rule-engine.test.ts` 新增 11 个测试用例：7 个 `redactOutput` 银行卡场景（银联 16/19 位、Visa、MasterCard、AmEx、手机号不误判、身份证不误判），4 个 `detectPiiTypes` 场景
+- 全量测试通过：176/176（较 v1.3.5 新增 11 个）
+
+### 注意事项
+
+- 18 位银联卡（`62` 开头）若与身份证规则顺序冲突，因 `cn-id` 优先匹配，会被标记为 `[身份证已脱敏]`——安全角度仍为脱敏状态，可接受；16/17/19 位银联卡正确标记为 `[银行卡已脱敏]`
+
+---
+
 ## [1.3.5] - 2026-04-10 ✅ 单元测试 165/165，toolCallLog 意图对齐修复验证通过
 
 ### 修复（`## Agent 当前计划` 内容错误导致意图对齐失效）

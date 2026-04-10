@@ -83,7 +83,10 @@
       "Bash(echo 'hello world' 'TEST_SESSION=test-$\\(date +%s\\)' openclaw agent --session-id $TEST_SESSION -m '读取 /tmp/hello.txt 的内容' --json)",
       "Bash(/tmp/system_report.txt:*)",
       "Bash(SESSION_T15=\"manual-test-T1.5-1775821482\" grep \"$SESSION_T15\\\\|SlowPath\\\\|before_prompt_build\\\\|工具调用记录\\\\|模型调用\" ~/.openclaw/logs/gateway.log)",
-      "Bash(cp:*)"
+      "Bash(cp:*)",
+      "Bash(head -20 echo \"---\" grep -n \"版本\\\\|1\\\\.3\\\\.\\\\|银行卡\\\\|脱敏\\\\|outputRedact\\\\|PROMPT_GUARD\\\\|Prompt Guard\" /Users/georgehu/Mycode/ClawArmor/README.md)",
+      "Bash(head -20 echo \"---\" grep -n \"版本\\\\|1\\\\.3\\\\.\\\\|银行卡\\\\|脱敏\\\\|PII\\\\|redact\" /Users/georgehu/Mycode/ClawArmor/docs/architecture.md)",
+      "Bash(head -20 echo \"---\" grep -n \"版本\\\\|1\\\\.3\\\\.\\\\|银行卡\\\\|脱敏\\\\|T2\\\\.\" /Users/georgehu/Mycode/ClawArmor/docs/manual-test-guide.md)"
     ]
   }
 }

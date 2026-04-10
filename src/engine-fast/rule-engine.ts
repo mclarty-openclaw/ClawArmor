@@ -328,6 +328,9 @@ const OUTPUT_REDACTION_RULES = [
   // 中国电信个人信息
   { id: "cn-phone",     regex: /(?<!\d)(1[3-9]\d{9})(?!\d)/g,      mask: "[手机号已脱敏]" },
   { id: "cn-id",        regex: /(?<!\d)(\d{17}[\dXx])(?!\d)/g,     mask: "[身份证已脱敏]" },
+  // 银行卡号：覆盖主要卡组织 BIN 前缀（必须在 cn-id 之后，避免 18 位银联卡被误作身份证处理）
+  // 62开头(银联 16-19 位) | 4开头(Visa 16 位) | 5[1-5]开头(MasterCard 16 位) | 3[47]开头(AmEx 15 位)
+  { id: "cn-bank-card", regex: /(?<!\d)(62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?!\d)/g, mask: "[银行卡已脱敏]" },
   { id: "imsi",         regex: /(?<!\d)(46\d{13})(?!\d)/g,          mask: "[IMSI已脱敏]" },
   // 内网 IP（RFC1918：10.x.x.x / 172.16-31.x.x / 192.168.x.x）
   { id: "private-ip",   regex: /(?<!\d)((?:10\.(?:\d{1,3}\.){2}|192\.168\.\d{1,3}\.|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.)\d{1,3})(?!\d)/g, mask: "[内网IP已脱敏]" },
@@ -454,6 +457,7 @@ export function fingerprintSecret(value: string, source: string): string {
 const PII_DETECTORS: Array<{ type: string; regex: RegExp }> = [
   { type: "手机号",      regex: /(?<!\d)(1[3-9]\d{9})(?!\d)/ },
   { type: "身份证",      regex: /(?<!\d)(\d{17}[\dXx])(?!\d)/ },
+  { type: "银行卡号",    regex: /(?<!\d)(62\d{14,17}|4\d{15}|5[1-5]\d{14}|3[47]\d{13})(?!\d)/ },
   { type: "IMSI",       regex: /(?<!\d)(46\d{13})(?!\d)/ },
   { type: "内网IP",      regex: /(?:10\.(?:\d{1,3}\.){2}|192\.168\.\d{1,3}\.|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.)\d{1,3}/ },
   { type: "API密钥",     regex: /sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|AKIA[A-Z0-9]{16}/ },

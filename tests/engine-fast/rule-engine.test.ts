@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { scanUserInput, scanToolCallParams, scanMemoryWrite, redactOutput, scanSkillContent } from "../../src/engine-fast/rule-engine.js";
+import { scanUserInput, scanToolCallParams, scanMemoryWrite, redactOutput, scanSkillContent, detectPiiTypes } from "../../src/engine-fast/rule-engine.js";
 
 describe("scanUserInput", () => {
   it("正常请求不触发风险", () => {
@@ -92,6 +92,78 @@ describe("redactOutput", () => {
     const { result, redactedCount } = redactOutput("这是一段普通输出，没有任何密钥");
     expect(redactedCount).toBe(0);
     expect(result).toBe("这是一段普通输出，没有任何密钥");
+  });
+
+  it("脱敏银联卡号 16 位", () => {
+    const { result, redactedCount } = redactOutput("用户银行卡：6228480402564890，请勿外传");
+    expect(redactedCount).toBeGreaterThan(0);
+    expect(result).not.toContain("6228480402564890");
+    expect(result).toContain("[银行卡已脱敏]");
+  });
+
+  it("脱敏银联卡号 19 位", () => {
+    const { result, redactedCount } = redactOutput("账户：6250941006528599658 余额不足");
+    expect(redactedCount).toBeGreaterThan(0);
+    expect(result).not.toContain("6250941006528599658");
+    expect(result).toContain("[银行卡已脱敏]");
+  });
+
+  it("脱敏 Visa 卡号 16 位", () => {
+    const { result, redactedCount } = redactOutput("绑定卡 4532015112830366 已验证");
+    expect(redactedCount).toBeGreaterThan(0);
+    expect(result).not.toContain("4532015112830366");
+    expect(result).toContain("[银行卡已脱敏]");
+  });
+
+  it("脱敏 MasterCard 卡号 16 位", () => {
+    const { result, redactedCount } = redactOutput("支付卡：5425233430109903");
+    expect(redactedCount).toBeGreaterThan(0);
+    expect(result).not.toContain("5425233430109903");
+    expect(result).toContain("[银行卡已脱敏]");
+  });
+
+  it("脱敏 AmEx 卡号 15 位", () => {
+    const { result, redactedCount } = redactOutput("AmEx: 371449635398431");
+    expect(redactedCount).toBeGreaterThan(0);
+    expect(result).not.toContain("371449635398431");
+    expect(result).toContain("[银行卡已脱敏]");
+  });
+
+  it("短数字（11 位手机号）不误判为银行卡", () => {
+    const { result } = redactOutput("手机：13812345678");
+    // 应被手机号规则捕获，不应被银行卡规则捕获
+    expect(result).toContain("[手机号已脱敏]");
+    expect(result).not.toContain("[银行卡已脱敏]");
+  });
+
+  it("身份证号不误判为银行卡", () => {
+    // 110101199001011234 是 18 位，cn-id 先命中
+    const { result } = redactOutput("身份证：110101199001011234");
+    expect(result).toContain("[身份证已脱敏]");
+    expect(result).not.toContain("[银行卡已脱敏]");
+  });
+});
+
+describe("detectPiiTypes - 银行卡号", () => {
+  it("检测到银联卡号", () => {
+    const types = detectPiiTypes("卡号：6228480402564890");
+    expect(types).toContain("银行卡号");
+  });
+
+  it("检测到 Visa 卡号", () => {
+    const types = detectPiiTypes("绑定 Visa 卡 4532015112830366");
+    expect(types).toContain("银行卡号");
+  });
+
+  it("普通文本不误报银行卡", () => {
+    const types = detectPiiTypes("今天完成了订单 #12345，总金额 299 元");
+    expect(types).not.toContain("银行卡号");
+  });
+
+  it("银行卡与手机号共存时均被检测到", () => {
+    const types = detectPiiTypes("手机 13812345678，卡号 6228480402564890");
+    expect(types).toContain("手机号");
+    expect(types).toContain("银行卡号");
   });
 });
 
