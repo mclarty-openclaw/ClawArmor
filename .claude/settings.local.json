@@ -78,7 +78,12 @@
       "Bash(S85_BEFORE=191382 openclaw agent --agent main --message \"帮我查询北京今天的天气\" --json)",
       "Bash(echo \"系统健康检查完成，状态正常。:*)",
       "Bash(__NEW_LINE_f1ca072b94515c34__ echo \"分析报告摘要：本次系统评估完成。:*)",
-      "Bash(__NEW_LINE_f1ca072b94515c34__ cat:*)"
+      "Bash(__NEW_LINE_f1ca072b94515c34__ cat:*)",
+      "Bash(launchctl list:*)",
+      "Bash(echo 'hello world' 'TEST_SESSION=test-$\\(date +%s\\)' openclaw agent --session-id $TEST_SESSION -m '读取 /tmp/hello.txt 的内容' --json)",
+      "Bash(/tmp/system_report.txt:*)",
+      "Bash(SESSION_T15=\"manual-test-T1.5-1775821482\" grep \"$SESSION_T15\\\\|SlowPath\\\\|before_prompt_build\\\\|工具调用记录\\\\|模型调用\" ~/.openclaw/logs/gateway.log)",
+      "Bash(cp:*)"
     ]
   }
 }

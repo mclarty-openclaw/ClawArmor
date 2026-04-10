@@ -215,47 +215,22 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
     return wrapHook("before_prompt_build", async () => {
       // Step 1: 读取 Fast Path 累计的本轮风险信号
       const turn = runtime.state.peekTurnSignals(event.sessionKey);
-      // 诊断：打印 before_prompt_build 事件字段及 messages 末尾用户消息
-      {
-        const eObj = event as Record<string, unknown>;
-        const msgs = eObj.messages as Array<{role:string;content:unknown}>|undefined;
-        const lastUser = Array.isArray(msgs) ? [...msgs].reverse().find(m=>m.role==="user") : undefined;
-        const lastUserText = (() => {
-          if (!lastUser) return "none";
-          const c = lastUser.content;
-          const text = typeof c === "string" ? c : Array.isArray(c)
-            ? (c as Array<{type?:string;text?:string}>).filter(x=>!x.type||x.type==="text").map(x=>x.text??"").join("").trim()
-            : "";
-          return text.slice(0, 100);
-        })();
-        logger.debug("[ClawArmor][diag] before_prompt_build messages 诊断", {
-          keys: Object.keys(eObj).filter(k=>k!=="messages"),
-          messagesCount: Array.isArray(msgs) ? msgs.length : "none",
-          lastMsgRole: Array.isArray(msgs) && msgs.length > 0 ? msgs[msgs.length-1]?.role : "none",
-          lastUserContent: lastUserText,
-        });
-      }
+      const toolCallLogSnapshot = runtime.hooks.getToolCallLog(event.sessionKey);
       logger.info("[ClawArmor] before_prompt_build 触发", {
         sessionKey: event.sessionKey,
         hasTurnSignals: !!turn,
         injectionFlags: turn?.injectionFlags ?? [],
         isToolResultSuspicious: turn?.isToolResultSuspicious ?? false,
         runtimeFlags: turn?.runtimeFlags ?? [],
+        toolCallLogCount: toolCallLogSnapshot.length,
+        toolCallLogPreview: toolCallLogSnapshot.slice(0, 3),
       });
 
-      // Step 1.5: before_agent_start 事件通常不含 messages，导致基准意图为空。
-      // 在 before_prompt_build 时 messages 已存在，在此补充捕获用户原始意图（只捕获一次，不覆盖已有值）
-      const eventObj = event as Record<string, unknown>;
-      {
-        const msgs = eventObj.messages as Array<{ role: string; content: unknown }> | undefined;
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          const lateInput = extractUserInput({ messages: msgs } as PluginHookAgentStartEvent);
-          if (lateInput) runtime.hooks.updateBaselineIntent(event.sessionKey, lateInput);
-        }
-      }
-
       // Step 2: 确定 LLM 检查输入
-      //   优先级：显式 plan/planText > 本轮对话上下文 + Fast Path 信号 > Fast Path 信号 > null（跳过）
+      //   优先级：显式 plan/planText > 工具调用记录 + Fast Path 信号 > null（跳过）
+      //   注意：before_prompt_build.messages 在 OpenClaw 中只含本轮工具返回结果（不含 user/assistant 消息），
+      //   因此不再使用 extractCurrentTurnContext，改为读取 ClawArmor 自身记录的 toolCallLog
+      const eventObj = event as Record<string, unknown>;
       const explicitPlan = eventObj.planText as string | undefined
         ?? eventObj.plan as string | undefined;
 
@@ -263,16 +238,17 @@ export function registerClawArmorPlugin(api: OpenClawPluginApi): void {
       if (explicitPlan) {
         planForLLM = explicitPlan;
       } else {
-        // 从事件的 messages 数组提取本轮最新对话内容（Agent 当前正在做什么）
-        const turnContext = extractCurrentTurnContext(eventObj);
+        const toolCallLog = runtime.hooks.getToolCallLog(event.sessionKey);
         const fastPathSignals = buildSyntheticPlanContext(turn);
-        if (turnContext || fastPathSignals) {
+        if (toolCallLog.length > 0 || fastPathSignals) {
           const parts: string[] = [];
-          if (turnContext) parts.push(`【本轮对话上下文（最近消息）】\n${turnContext}`);
+          if (toolCallLog.length > 0) {
+            parts.push(`【本轮 Agent 工具调用记录】\n${toolCallLog.map((l) => `  · ${l}`).join("\n")}`);
+          }
           if (fastPathSignals) parts.push(fastPathSignals);
           planForLLM = parts.join("\n\n");
         } else {
-          planForLLM = null; // 零风险信号且无消息上下文，跳过 LLM
+          planForLLM = null; // 本轮无工具调用且无风险信号，跳过 LLM
         }
       }
 
@@ -426,50 +402,7 @@ function extractResultText(result: unknown): string {
   try { return JSON.stringify(result) ?? ""; } catch { return ""; }
 }
 
-/**
- * 从消息 content 字段提取纯文本（兼容字符串和 [{type,text}] 数组两种格式）
- */
-function extractMessageContent(content: unknown): string {
-  if (typeof content === "string") return content.trim();
-  if (Array.isArray(content)) {
-    return (content as Array<{ type?: string; text?: string }>)
-      .filter((c) => !c.type || c.type === "text")
-      .map((c) => c.text ?? "")
-      .join("")
-      .trim();
-  }
-  return "";
-}
 
-/**
- * 从 before_prompt_build 事件的 messages 数组中提取本轮最新对话上下文
- * 取最近 3 条消息（user / assistant / tool），每条截断至 200 字符
- * 用于填充 LLM prompt 中的 "## Agent 当前计划" 节，让意图对齐模型看到真实上下文
- * 若事件不含 messages 字段则返回 null
- */
-function extractCurrentTurnContext(event: Record<string, unknown>): string | null {
-  try {
-    const messages = event.messages as Array<{ role: string; content: unknown }> | undefined;
-    if (!Array.isArray(messages) || messages.length === 0) return null;
-
-    // 取最近 3 条，避免 prompt 过长撑爆小模型上下文
-    const recent = messages.slice(-3);
-    const MAX_CONTENT_LEN = 200;
-    const lines: string[] = [];
-
-    for (const msg of recent) {
-      const role = (msg.role ?? "").toLowerCase();
-      const text = extractMessageContent(msg.content);
-      if (!text) continue;
-      const label = role === "user" ? "用户" : role === "assistant" ? "助手" : "工具返回";
-      const truncated = text.length > MAX_CONTENT_LEN
-        ? text.slice(0, MAX_CONTENT_LEN) + "…"
-        : text;
-      lines.push(`[${label}] ${truncated}`);
-    }
-    return lines.length > 0 ? lines.join("\n") : null;
-  } catch { return null; }
-}
 
 const EXTERNAL_TOOL_RE = /^(?:web_fetch|web_search|browser|firecrawl_\w+|tavily_\w+|http_request|api)$/i;
 function isExternalTool(name: string): boolean { return EXTERNAL_TOOL_RE.test(name); }

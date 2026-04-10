@@ -67,6 +67,12 @@ export type ClawArmorRuntime = {
   riskyScriptPaths: Map<string, Set<string>>;
   /** runId → loop 计数器 */
   loopCallCounts: Map<string, Map<string, number>>;
+  /**
+   * sessionKey → 本轮工具调用记录（有序，不去重）
+   * 格式：["toolName(参数摘要) → 结果摘要", ...]
+   * 用于 before_prompt_build 构建 "## Agent 当前计划"，替代不可靠的 messages 数组
+   */
+  toolCallLogs: Map<string, string[]>;
   hooks: ClawArmorHooks;
 };
 
@@ -89,6 +95,11 @@ export type ClawArmorHooks = {
    * 若该 session 已有非空基准则不覆盖。
    */
   updateBaselineIntent(sessionKey: string, input: string): void;
+  /**
+   * 获取本轮工具调用记录（有序列表），用于构建 "## Agent 当前计划" 上下文。
+   * 每条格式："toolName(参数摘要) → 结果摘要"
+   */
+  getToolCallLog(sessionKey: string): string[];
   onSessionEnd(sessionKey: string): Promise<void>;
   onRunEnd(runId: string): Promise<void>;
 };
@@ -102,6 +113,45 @@ function isExternalTool(toolName: string): boolean { return EXTERNAL_TOOL_RE.tes
 
 const OUTBOUND_TOOL_RE = /^(?:curl|wget|http_request|web_fetch|fetch|url_fetch)$/i;
 function isOutboundTool(toolName: string): boolean { return OUTBOUND_TOOL_RE.test(toolName); }
+
+// ============================================================
+// 工具调用日志摘要构建（供意图对齐 LLM 使用）
+// ============================================================
+
+/**
+ * 提取工具调用的关键参数摘要（最多 80 字符）
+ * 按优先级读取 path/file_path/url/command 等代表性参数
+ */
+function buildParamSummary(toolName: string, params: Record<string, unknown>): string {
+  // 按优先级读取各工具常见的代表性参数
+  const repr = params.path ?? params.file_path ?? params.filePath ?? params.file
+    ?? params.url ?? params.command ?? params.query ?? params.content;
+  if (repr != null) {
+    return String(repr).replace(/\n/g, " ").slice(0, 80);
+  }
+  const keys = Object.keys(params);
+  if (keys.length === 0) return "";
+  return keys.slice(0, 2)
+    .map((k) => `${k}="${String(params[k]).slice(0, 40).replace(/\n/g, " ")}"`)
+    .join(", ");
+}
+
+/**
+ * 将工具返回结果压缩为单行摘要（最多 100 字符）
+ * 优先识别 JSON 错误格式，否则截断纯文本
+ */
+function buildResultSummary(result: string): string {
+  if (!result || result.trim().length === 0) return "空结果";
+  try {
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    if (parsed.error || parsed.status === "error") {
+      const err = String(parsed.error ?? parsed.message ?? "").replace(/\n/g, " ").slice(0, 100);
+      return `错误: ${err}`;
+    }
+  } catch { /* 非 JSON，继续 */ }
+  const single = result.replace(/\n/g, " ").trim();
+  return single.length > 100 ? `成功 (${result.length} 字符)` : `成功: "${single.slice(0, 100)}"`;
+}
 
 // ============================================================
 // 防御模式配置提取
@@ -137,6 +187,8 @@ export function createClawArmorRuntime(
   const exfilStates = new Map<string, ExfilChainState>();
   const riskyScriptPaths = new Map<string, Set<string>>();
   const loopCallCounts = new Map<string, Map<string, number>>();
+  // 工具调用记录：sessionKey → 本轮有序列表，每条 "toolName(param) → result"
+  const toolCallLogs = new Map<string, string[]>();
 
   const defenseModes = buildDefenseModes(config);
 
@@ -163,6 +215,9 @@ export function createClawArmorRuntime(
     // Hook 1: Agent 启动
     // ----------------------------------------------------------
     async onAgentStart({ sessionKey, runId, userInput }) {
+      // 清除上一轮工具调用记录，避免跨轮污染
+      toolCallLogs.delete(sessionKey);
+
       // 捕获基准意图（供 Slow Path 意图对齐使用）
       baselineIntents.set(sessionKey, captureBaselineIntent(sessionKey, userInput));
 
@@ -280,6 +335,14 @@ export function createClawArmorRuntime(
       const { updatedState } = analyzeToolCallForExfil(toolName, params, priorExfil);
       exfilStates.set(runId, updatedState);
 
+      // 记录本次工具调用到 toolCallLogs（供 before_prompt_build 意图对齐使用）
+      // 结果摘要由 afterToolCall 补充追加
+      const paramSummary = buildParamSummary(toolName, params);
+      const entry = paramSummary ? `${toolName}("${paramSummary}")` : toolName;
+      const sessionLog = toolCallLogs.get(sessionKey) ?? [];
+      sessionLog.push(entry);
+      toolCallLogs.set(sessionKey, sessionLog);
+
       return { action: "allow" };
     },
 
@@ -289,6 +352,13 @@ export function createClawArmorRuntime(
     async afterToolCall({ sessionKey, runId, toolName, result, isExternal }) {
       // INFO 级别日志：确认 after_tool_call 钩子被 OpenClaw 框架正确触发
       log.info("[ClawArmor] 工具返回扫描", { toolName, resultLength: result.length });
+
+      // 将结果摘要追加到最后一条工具调用记录（beforeToolCall 已写入工具名+参数）
+      const sessionLog = toolCallLogs.get(sessionKey);
+      if (sessionLog && sessionLog.length > 0) {
+        const resultSummary = buildResultSummary(result);
+        sessionLog[sessionLog.length - 1] += ` → ${resultSummary}`;
+      }
       // 工具结果扫描（Fast Path）
       if (config.toolResultScanEnabled) {
         const report = scanToolResult(toolName, result, isExternal);
@@ -487,11 +557,19 @@ export function createClawArmorRuntime(
     },
 
     // ----------------------------------------------------------
+    // 工具调用记录读取（供 before_prompt_build 意图对齐使用）
+    // ----------------------------------------------------------
+    getToolCallLog(sessionKey: string): string[] {
+      return toolCallLogs.get(sessionKey) ?? [];
+    },
+
+    // ----------------------------------------------------------
     // Hook 7: 会话结束清理
     // ----------------------------------------------------------
     async onSessionEnd(sessionKey: string) {
       state.clearSession(sessionKey);
       baselineIntents.delete(sessionKey);
+      toolCallLogs.delete(sessionKey);
       taintTracker.clear();
       log.debug("[ClawArmor] 会话已清理", { sessionKey });
     },
@@ -507,5 +585,5 @@ export function createClawArmorRuntime(
     },
   };
 
-  return { state, taintTracker, gateway, skillWatcher, baselineIntents, exfilStates, riskyScriptPaths, loopCallCounts, hooks };
+  return { state, taintTracker, gateway, skillWatcher, baselineIntents, exfilStates, riskyScriptPaths, loopCallCounts, toolCallLogs, hooks };
 }

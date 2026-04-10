@@ -1,5 +1,51 @@
 # ClawArmor 变更日志
 
+## [1.3.5] - 2026-04-10 ✅ 单元测试 165/165，toolCallLog 意图对齐修复验证通过
+
+### 修复（`## Agent 当前计划` 内容错误导致意图对齐失效）
+
+**根因：`extractCurrentTurnContext` 读取 `messages` 数组得到无意义内容**
+
+- 问题日志：`## Agent 当前计划\n【本轮对话上下文（最近消息）】\n[工具返回] {"status":"error","tool":"read","error":"ENOENT…"}`
+- 根因：OpenClaw `before_prompt_build.messages` 只含本轮工具返回结果（不含 user/assistant 消息），且工具失败时只有错误 JSON；`extractCurrentTurnContext` 读取 `messages` 导致 LLM 接收到无意义错误内容
+- 旧方案已完全废弃：删除 `extractCurrentTurnContext`、`extractMessageContent` 及 Step 1.5（从 messages 补充基准意图）
+
+**新方案：自追踪 `toolCallLogs` Map**
+
+- `handlers.ts` 新增 `toolCallLogs: Map<string, string[]>`，在 `beforeToolCall` 记录工具调用摘要，在 `afterToolCall` 追加结果摘要
+- 格式示例：`read("/tmp/system_report.txt") → 成功 (465 字符)`
+- `before_prompt_build` 通过 `runtime.hooks.getToolCallLog(sessionKey)` 读取记录，替代不可靠的 `messages` 数组
+- 当 `toolCallLog` 为空且无 Fast Path 风险信号时，`planForLLM = null` → 跳过 LLM 调用（节省资源）
+
+**架构澄清（单步 vs 多步任务）**
+
+- 单步任务（单次 LLM 推理）：`before_prompt_build` 仅触发一次，此时 `toolCallLog` 为空，LLM 不被调用；主防御由 `tool_result_persist`（注入净化）+ `beforeToolCall`（拦截）承担
+- 多步任务（多次 LLM 推理）：第二次 `before_prompt_build` 触发时 `toolCallLog` 已有数据，意图对齐 LLM 获得真实的工具调用记录，可进行有效的前后意图对比
+
+### 修复（`onAgentStart` 未清理上轮 `toolCallLog` 导致跨轮污染）
+
+- `toolCallLogs.delete(sessionKey)` 现于 `onAgentStart` 最先执行，防止跨对话轮次的记录累积
+
+### 修复（`buildParamSummary` 遗漏 `file` 参数键）
+
+- 部分工具（如 OpenClaw 内置 `read`）使用 `file` 而非 `path`/`filePath` 作为参数键
+- 修复：将 `params.file` 添加至优先级列表（仅次于 `filePath`，高于 `url`）
+
+### 新增（`before_prompt_build` 调试日志）
+
+- 新增 `toolCallLogCount` 和 `toolCallLogPreview` 字段到 `before_prompt_build 触发` 日志
+- 便于核查各轮 LLM 调用时的工具记录状态
+
+### 人工测试结果（2026-04-10 19:xx）
+
+| 测试 | 场景 | 结果 | 关键日志 |
+|------|------|------|---------|
+| T1.5 普通文件放行 | `hello.txt` 无注入 | PASS | `toolCallLogCount:0`, `hasTurnSignals:false` → LLM 不调用 |
+| T4.1 文件内注入防御 | `system_report.txt` 含提示词注入 | PASS | `tool_result_persist injectionNeutralized:true`，Agent 自主识别攻击并拒绝 |
+| 多步对比任务 | 对比两个 report 文件 CPU | PASS | 读取正确，Agent 给出正确分析 |
+
+---
+
 ## [1.3.4] - 2026-04-10 ✅ 单元测试 165/165，云端 API 人工测试全覆盖
 
 ### 修复（`## 用户原始意图` 落后一轮的根本原因）
