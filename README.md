@@ -4,6 +4,8 @@
 
 **核心理念**：快-慢双引擎 + 五层纵深防御 + 语义意图对齐，对抗提示词注入、数据外泄、意图劫持等 Agent 安全威胁。
 
+ClawArmor 是一个公开维护的 OSS Agent 安全项目，目标是把 AI Agent 运行时的安全控制做成可测试、可审计、可复用的插件层。项目优先覆盖提示词注入、危险工具调用、脚本溯源绕过、污点传播、敏感信息外泄和输出脱敏等高风险路径。
+
 ---
 
 ## 功能特性
@@ -20,6 +22,32 @@
 | ⚡ 零生产依赖 | 纯 Node.js 原生实现，无第三方依赖 |
 | 🔓 Fail-open 设计 | Slow Path 失败时自动放行，保障业务连续性 |
 | 📄 专属配置文件 | 全量配置在 `claw-armor.config.json`，不污染 openclaw.json |
+
+---
+
+## 为什么这个项目对 OSS Agent 生态重要
+
+Agent 框架正在把文件系统、Shell、网络请求、记忆系统和第三方工具暴露给模型调用。传统代码审查很难覆盖“外部内容进入上下文后诱导 Agent 调用高权限工具”的二阶风险。ClawArmor 尝试把这类运行时风险拆成可验证的防御层：
+
+- 在工具调用前拦截危险命令、受保护路径和脚本溯源风险
+- 在工具结果和持久化阶段净化嵌入式提示词注入
+- 用污点追踪和数据流规则识别外部数据驱动的高权限行为
+- 用输出脱敏和 Prompt Guard 降低凭证、PII、银行卡号等敏感数据泄露风险
+- 为维护者提供结构化日志、测试夹具和人工验证指南，方便在 PR 和 release 前复查安全行为
+
+这使 ClawArmor 不只是一个防护插件，也可以作为 OSS Agent 安全测试、规则设计和维护自动化的参考实现。
+
+## OSS 维护与 Codex 使用计划
+
+本项目会使用 Codex 辅助维护以下工作流：
+
+- PR 代码审查：检查规则绕过、配置回归、测试覆盖缺口和误报风险
+- 安全审查：重点复核提示词注入、命令执行、污点传播、数据外泄和输出脱敏路径
+- Issue 分类：把 bug、误报、规则增强、文档问题和安全报告分流处理
+- Release 准备：生成 changelog 摘要、运行发布检查清单、复查关键防御层
+- 文档维护：保持 README、人工测试指南、路线图和安全政策同步
+
+如果你要报告漏洞或绕过路径，请先阅读 [SECURITY.md](SECURITY.md)。如果你想参与开发，请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。项目路线图见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -525,6 +553,24 @@ npm test
 npm run test:watch
 
 # 构建（输出到 dist/）
+npm run build
+```
+
+---
+
+## 开源维护
+
+- License: [MIT](LICENSE)
+- 安全政策: [SECURITY.md](SECURITY.md)
+- 贡献指南: [CONTRIBUTING.md](CONTRIBUTING.md)
+- 路线图: [ROADMAP.md](ROADMAP.md)
+- 发布检查清单: [docs/release-checklist.md](docs/release-checklist.md)
+
+发布前建议至少运行：
+
+```bash
+npm run typecheck
+npm test
 npm run build
 ```
 

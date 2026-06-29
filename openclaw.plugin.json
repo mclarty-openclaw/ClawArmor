@@ -2,7 +2,7 @@
   "id": "claw-armor",
   "name": "ClawArmor",
   "description": "混合驱动的新一代 Agent 安全插件 - 五层纵深防御 + 语义意图对齐",
-  "version": "1.1.0",
+  "version": "1.3.6",
   "configFile": "claw-armor.config.json",
   "configSchema": {
     "type": "object",

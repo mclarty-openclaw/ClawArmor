@@ -1,0 +1,45 @@
+name: Security hardening
+description: Propose a new defense rule, regression test, or security improvement.
+title: "[Security]: "
+labels: ["security", "hardening", "needs-triage"]
+body:
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk or attack path
+      description: Keep exploit details redacted if this is a live vulnerability.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Defense layer
+      options:
+        - selfProtection
+        - commandBlock
+        - encodingGuard
+        - scriptProvenanceGuard
+        - memoryGuard
+        - loopGuard
+        - exfiltrationGuard
+        - userRiskScan
+        - skillScan
+        - toolResultScan
+        - outputRedaction
+        - promptGuard
+        - taintTracking
+        - slowEngine
+        - documentation
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Suggested tests or verification
